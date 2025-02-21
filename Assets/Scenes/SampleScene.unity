@@ -862,7 +862,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 370cc21b10436844299e0908936885dc, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  TopicName: camera/image_raw
+  quadObject: {fileID: 1935689371}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

@@ -1,76 +1,95 @@
 using UnityEngine;
+using AsyncIO;
+using NetMQ;
+using NetMQ.Sockets;
+using System.Threading;
+using System;
+using Newtonsoft.Json.Linq;
 using System.Collections;
-using Unity.Robotics.ROSTCPConnector;
-using SensorMsgs = RosMessageTypes.Sensor;
 
 public class ImageSubscriber : MonoBehaviour
 {
-    public string TopicName = "camera/image_raw";
-    private ROSConnection rosConnection;
+    private Thread clientThread;
+    private bool running = true;
+    private SubscriberSocket subscriber;
+    public GameObject quadObject; // Assign a Quad in Unity to display the image
     private Material quadMaterial;
-    private Texture2D texture;
-    private RenderTexture renderTexture;
-    private byte[] currentImageBytes = null;
+    private Texture2D receivedTexture;
 
     void Start()
     {
-        // Initialize ROS connection
-        rosConnection = ROSConnection.GetOrCreateInstance();
-        rosConnection.Subscribe<SensorMsgs.ImageMsg>(TopicName, ReceiveImage);
-
-        // Initialize RenderTexture and Texture2D for the Quad
-        renderTexture = new RenderTexture(640, 480, 24);
-        texture = new Texture2D(640, 480, TextureFormat.RGB24, false);
-        quadMaterial = GetComponent<Renderer>().material;
-
-        // Apply RenderTexture to Quad material
-        quadMaterial.mainTexture = renderTexture;
+        quadMaterial = quadObject.GetComponent<MeshRenderer>().material;
+        clientThread = new Thread(ReceiveData);
+        clientThread.IsBackground = true;
+        clientThread.Start();
     }
 
-    private void ReceiveImage(SensorMsgs.ImageMsg rosImage)
+    private void ReceiveData()
     {
-        Debug.Log("Received image with size: " + rosImage.data.Length);
+        ForceDotNet.Force(); // Required for NetMQ to work in Unity
 
-        // Ensure the encoding is rgb8 as expected
-        if (rosImage.encoding != "rgb8")
+        using (subscriber = new SubscriberSocket())
         {
-            Debug.LogError("Received image is not in rgb8 format!");
-            return;
+            subscriber.Connect("tcp://172.22.243.38:4401"); // Replace with your ROS 2 bridge address
+            subscriber.Subscribe("/camera/image_raw"); // Replace with your ROS 2 topic
+
+            Debug.Log("Connected to ROS 2 Bridge!");
+
+            while (running)
+            {
+                try
+                {
+                    if (subscriber.TryReceiveFrameString(out string message))
+                    {
+                        Debug.Log("Received Image Message");
+                        ProcessMessage(message);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError("NetMQ Error: " + ex.Message);
+                }
+            }
         }
-
-        byte[] imageBytes = rosImage.data;
-
-        if (imageBytes == null || imageBytes.Length == 0)
-        {
-            Debug.LogError("Received image data is empty!");
-            return;
-        }
-
-        // Store the image bytes for later processing
-        currentImageBytes = imageBytes;
-
-        // Start processing the image in the next frame
-        StartCoroutine(UpdateTexture());
+        NetMQConfig.Cleanup(); // Ensures proper cleanup of NetMQ
     }
 
-    private IEnumerator UpdateTexture()
+    private void ProcessMessage(string message)
     {
-        // Wait until the end of the current frame
-        yield return null;
-
-        if (currentImageBytes != null && currentImageBytes.Length > 0)
+        try
         {
-            // Create the Texture2D using the image data
-            texture.LoadRawTextureData(currentImageBytes);
-            texture.Apply();  // Apply the changes to the texture
+            JObject json = JObject.Parse(message);
+            string base64Image = json["data"].ToString(); // Extract image data
+            byte[] imageBytes = Convert.FromBase64String(base64Image);
 
-            // Update the RenderTexture (ensure this happens on the main thread)
-            Graphics.Blit(texture, renderTexture);
+            Texture2D texture = new Texture2D(1, 1);
+            texture.LoadImage(imageBytes);
+            texture.Apply();
+
+            receivedTexture = texture;
+
+            // Start coroutine to apply texture in the main thread
+            StartCoroutine(UpdateTexture());
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError("Error processing image message: " + ex.Message);
+        }
+    }
+
+    IEnumerator UpdateTexture()
+    {
+        yield return new WaitForEndOfFrame(); // Ensures this runs on the main thread
+        if (receivedTexture != null)
+        {
+            quadMaterial.mainTexture = receivedTexture;
         }
     }
 
     void OnApplicationQuit()
     {
-        rosConnection.Unsubscribe(TopicName);
+        running = false;
+        if (subscriber != null) subscriber.Dispose();
+        clientThread.Join();
     }
 }
